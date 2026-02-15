@@ -1,8 +1,11 @@
 import os
+import sys
 import requests
-from typing import Optional, List, Dict, Any
+import importlib.util
+from typing import Optional, List, Dict, Any, Callable
+from pathlib import Path
 
-VERSION = "0.0.1"
+VERSION = "0.0.3"
 
 
 class PacketManagerError(Exception):
@@ -21,16 +24,22 @@ class File:
     def create(self, file: str) -> None:
         """Crée un fichier de configuration avec valeurs par défaut"""
         try:
+            # Créer le répertoire parent si nécessaire
+            os.makedirs(os.path.dirname(file) or ".", exist_ok=True)
+            
             with open(file, "w", encoding="utf-8") as f:
                 f.write("RDSV=0.0.0\n")
                 f.write("PM_USR=Romaxololt\n")
                 f.write("PM_REPO=R-Ecosystem\n")
-                f.write("LIBS=\n")
+                f.write("LIBS=R_ANT\n")  # Correction: démarrer avec une liste vide
         except IOError as e:
             raise PacketManagerError(f"Impossible de créer le fichier {file}: {e}")
 
     def read(self, key: str) -> Optional[str]:
         """Lit une valeur depuis le fichier"""
+        if not key:
+            raise ValueError("La clé ne peut pas être vide")
+            
         try:
             with open(self.file, "r", encoding="utf-8") as f:
                 for line in f:
@@ -58,21 +67,35 @@ class File:
 
     def update(self, key: str, value: str) -> None:
         """Met à jour une clé existante"""
+        if not key:
+            raise ValueError("La clé ne peut pas être vide")
+            
         try:
             with open(self.file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             
+            updated = False
             with open(self.file, "w", encoding="utf-8") as f:
                 for line in lines:
                     if line.strip().startswith(f"{key}="):
                         f.write(f"{key}={value}\n")
+                        updated = True
                     else:
                         f.write(line)
+            
+            # Si la clé n'existait pas, l'ajouter
+            if not updated:
+                with open(self.file, "a", encoding="utf-8") as f:
+                    f.write(f"{key}={value}\n")
+                    
         except IOError as e:
             raise PacketManagerError(f"Erreur de mise à jour: {e}")
 
     def delete(self, key: str) -> None:
         """Supprime une clé"""
+        if not key:
+            raise ValueError("La clé ne peut pas être vide")
+            
         try:
             with open(self.file, "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -99,13 +122,14 @@ class File:
 class PacketManager:
     """Gestionnaire de paquets"""
     
+    SEPARATOR = "|;RDS-SEPARATOR;|"
+    
     def __init__(self, config_file: str = "Ant.reco", base_dir: str = "."):
         self.config = File(config_file)
         self.base_dir = base_dir
         
         # Créer le répertoire de base si nécessaire
-        if not os.path.exists(self.base_dir):
-            os.makedirs(self.base_dir)
+        os.makedirs(self.base_dir, exist_ok=True)
 
     def _get_url(self, name: str) -> str:
         """Construit l'URL du paquet"""
@@ -115,36 +139,49 @@ class PacketManager:
         if not user or not repo:
             raise PacketManagerError("Configuration PM_USR ou PM_REPO manquante")
         
-        return f"https://raw.githubusercontent.com/{user}/{repo}/main/{name}"
+        # Correction: ajouter .py si nécessaire pour l'URL
+        package_name = name if name.endswith(".py") else f"{name}.py"
+        return f"https://raw.githubusercontent.com/{user}/{repo}/main/{package_name}"
+
+    def _get_libs_list(self) -> List[str]:
+        """Récupère la liste des bibliothèques installées"""
+        libs = self.config.read("LIBS") or ""
+        return [lib.strip() for lib in libs.split(self.SEPARATOR) if lib.strip()]
+
+    def _save_libs_list(self, libs_list: List[str]) -> None:
+        """Sauvegarde la liste des bibliothèques"""
+        self.config.update("LIBS", self.SEPARATOR.join(libs_list))
 
     def install(self, name: str) -> str:
         """Installe un paquet"""
         if not name:
             return "Erreur: nom de paquet vide"
         
+        # Normaliser le nom (sans .py)
+        package_name = name.replace(".py", "")
+        
         try:
-            url = self._get_url(name)
+            url = self._get_url(package_name)
             response = requests.get(url, timeout=10)
 
             if response.status_code != 200:
-                return f"Erreur: package '{name}' introuvable (status {response.status_code})"
+                return f"Erreur: package '{package_name}' introuvable (status {response.status_code})"
 
-            # Ajouter .py si pas déjà présent
-            filename = name if name.endswith(".py") else f"{name}.py"
+            # Sauvegarder le fichier
+            filename = f"{package_name}.py"
             path = os.path.join(self.base_dir, filename)
 
             with open(path, "wb") as f:
                 f.write(response.content)
 
             # Mettre à jour la liste des bibliothèques
-            libs = self.config.read("LIBS") or ""
-            libs_list = [lib for lib in libs.split("|;RDS-SEPARATOR;|") if lib]
+            libs_list = self._get_libs_list()
             
-            if name not in libs_list:
-                libs_list.append(name)
-                self.config.update("LIBS", "|;RDS-SEPARATOR;|".join(libs_list))
+            if package_name not in libs_list:
+                libs_list.append(package_name)
+                self._save_libs_list(libs_list)
 
-            return f"✓ {name} installé avec succès"
+            return f"✓ {package_name} installé avec succès"
 
         except requests.RequestException as e:
             return f"Erreur réseau lors de l'installation de {name}: {e}"
@@ -158,20 +195,24 @@ class PacketManager:
         if not name:
             return "Erreur: nom de paquet vide"
         
+        # Normaliser le nom (sans .py)
+        package_name = name.replace(".py", "")
+        
         try:
-            filename = name if name.endswith(".py") else f"{name}.py"
+            filename = f"{package_name}.py"
             path = os.path.join(self.base_dir, filename)
 
             if not os.path.exists(path):
-                return f"✗ {name} n'est pas installé"
+                return f"✗ {package_name} n'est pas installé"
 
             # Supprimer de la liste
-            libs = self.config.read("LIBS") or ""
-            libs_list = [lib for lib in libs.split("|;RDS-SEPARATOR;|") if lib and lib != name]
-            self.config.update("LIBS", "|;RDS-SEPARATOR;|".join(libs_list))
+            libs_list = self._get_libs_list()
+            if package_name in libs_list:
+                libs_list.remove(package_name)
+                self._save_libs_list(libs_list)
 
             os.remove(path)
-            return f"✓ {name} supprimé"
+            return f"✓ {package_name} supprimé"
 
         except OSError as e:
             return f"Erreur lors de la suppression de {name}: {e}"
@@ -180,23 +221,80 @@ class PacketManager:
 
     def list(self) -> List[str]:
         """Liste les paquets installés"""
-        libs = self.config.read("LIBS") or ""
-        return [lib for lib in libs.split("|;RDS-SEPARATOR;|") if lib]
+        return self._get_libs_list()
 
     def update(self, name: str) -> str:
         """Met à jour un paquet (réinstallation)"""
-        return self.install(name)
+        package_name = name.replace(".py", "")
+        
+        # Vérifier si le paquet est installé
+        if package_name not in self._get_libs_list():
+            return f"✗ {package_name} n'est pas installé"
+        
+        return self.install(package_name)
 
 
-def Ant(CMD: Dict[str, Any]) -> Any:
+class Loader:
+    """Chargeur de modules dynamiques"""
+    
+    def __init__(self, config_file: str = "Ant.reco", base_dir: str = "."):
+        self.config = File(config_file)
+        self.base_dir = base_dir
+        
+    def load(self, name: str) -> Optional[Callable]:
+        """
+        Charge un module et retourne sa classe/fonction principale
+        
+        Correction majeure: utilisation d'importlib.util pour charger dynamiquement
+        """
+        # Normaliser le nom
+        package_name = name.replace(".py", "")
+        
+        # Vérifier si le paquet est installé
+        libs = self.config.read("LIBS") or ""
+        libs_list = [lib.strip() for lib in libs.split("|;RDS-SEPARATOR;|") if lib.strip()]
+        
+        if package_name not in libs_list:
+            return None
+        
+        try:
+            # Chemin du module
+            module_path = os.path.join(self.base_dir, f"{package_name}.py")
+            
+            if not os.path.exists(module_path):
+                return None
+            
+            # Charger le module dynamiquement
+            spec = importlib.util.spec_from_file_location(package_name, module_path)
+            if spec is None or spec.loader is None:
+                return None
+                
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[package_name] = module
+            spec.loader.exec_module(module)
+            
+            # Chercher la classe/fonction avec le nom capitalisé
+            class_name = package_name[2:].capitalize()
+            if hasattr(module, class_name):
+                return getattr(module, class_name)
+
+            
+        except Exception as e:
+            print(f"Erreur lors du chargement de {package_name}: {e}")
+            return None
+
+
+def Ant(CMD: Dict[str, Any], uid=0) -> Any:
     """
     Interface principale pour Ant
     
     :param CMD: {
-        "CMD": "read|write|update|delete|install|remove|list|update_pkg",
+        "CMD": "read|write|update|delete|install|remove|list|update_pkg|exec",
         "KEY": "key",
         "VALUE": "value (optionnel)",
-        "FILE": "file (optionnel, défaut: Ant.reco)"
+        "FILE": "file (optionnel, défaut: Ant.reco)",
+        "UID": "user id (optionnel, défaut: 0)",
+        "BASE_DIR": "répertoire de base (optionnel, défaut: .)"
     }
     """
     if not isinstance(CMD, dict) or "CMD" not in CMD:
@@ -204,6 +302,7 @@ def Ant(CMD: Dict[str, Any]) -> Any:
     
     try:
         file_path = CMD.get("FILE", "Ant.reco")
+        base_dir = CMD.get("BASE_DIR", ".")
         file = File(file_path)
         
         cmd = CMD["CMD"].lower()
@@ -212,18 +311,19 @@ def Ant(CMD: Dict[str, Any]) -> Any:
         if cmd == "read":
             if "KEY" not in CMD:
                 return "Erreur: KEY manquant"
-            return file.read(CMD["KEY"])
+            result = file.read(CMD["KEY"])
+            return result if result is not None else f"✗ Clé '{CMD['KEY']}' non trouvée"
         
         elif cmd == "write":
             if "KEY" not in CMD or "VALUE" not in CMD:
                 return "Erreur: KEY ou VALUE manquant"
-            file.write(CMD["KEY"], CMD["VALUE"])
+            file.write(CMD["KEY"], str(CMD["VALUE"]))
             return f"✓ {CMD['KEY']} écrit"
         
         elif cmd == "update":
             if "KEY" not in CMD or "VALUE" not in CMD:
                 return "Erreur: KEY ou VALUE manquant"
-            file.update(CMD["KEY"], CMD["VALUE"])
+            file.update(CMD["KEY"], str(CMD["VALUE"]))
             return f"✓ {CMD['KEY']} mis à jour"
         
         elif cmd == "delete":
@@ -236,36 +336,58 @@ def Ant(CMD: Dict[str, Any]) -> Any:
         elif cmd == "install":
             if "KEY" not in CMD:
                 return "Erreur: KEY (nom du paquet) manquant"
-            pm = PacketManager(file_path)
+            pm = PacketManager(file_path, base_dir)
             return pm.install(CMD["KEY"])
         
         elif cmd == "remove":
             if "KEY" not in CMD:
                 return "Erreur: KEY (nom du paquet) manquant"
-            pm = PacketManager(file_path)
+            pm = PacketManager(file_path, base_dir)
             return pm.remove(CMD["KEY"])
         
         elif cmd == "list":
-            pm = PacketManager(file_path)
-            return pm.list()
+            pm = PacketManager(file_path, base_dir)
+            libs = pm.list()
+            return libs if libs else ["Aucun paquet installé"]
         
         elif cmd == "update_pkg":
             if "KEY" not in CMD:
                 return "Erreur: KEY (nom du paquet) manquant"
-            pm = PacketManager(file_path)
+            pm = PacketManager(file_path, base_dir)
             return pm.update(CMD["KEY"])
+        
+        elif cmd == "exec":
+            if "KEY" not in CMD:
+                return "Erreur: KEY (nom du paquet) manquant"
+            
+            loader = Loader(file_path, base_dir)
+            fn = loader.load(CMD["KEY"])
+
+            if fn is None:
+                return f"✗ {CMD['KEY']} n'est pas installé ou introuvable"
+            
+            if callable(fn):
+                # Préparer les arguments
+                args = []
+                kwargs = {}
+                
+                if "VALUE" in CMD:
+                    args.append(CMD["VALUE"])
+                if "UID" in CMD:
+                    kwargs["uid"] = CMD["UID"]
+                
+                # Appeler la fonction
+                return fn(*args, **kwargs)
+            else:
+                return f"✗ {CMD['KEY']} n'est pas une fonction callable {fn}"
         
         else:
             return f"Erreur: commande '{cmd}' inconnue"
     
     except PacketManagerError as e:
         return f"Erreur PacketManager: {e}"
+    except ValueError as e:
+        return f"Erreur de validation: {e}"
     except Exception as e:
-        return f"Erreur inattendue: {e}"
+        return f"Erreur inattendue: {type(e).__name__}: {e}"
 
-
-if __name__ == "__main__":
-    # Tests
-    print(Ant({"CMD": "install", "KEY": "Ant.py"}))
-    print(Ant({"CMD": "install", "KEY": "R-SQUID"}))
-    print("Paquets installés:", Ant({"CMD": "list"}))
