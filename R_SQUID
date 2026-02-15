@@ -1,1 +1,212 @@
-# R-SQUID for R-Ecosystem
+from R_ANT import Ant
+import readline, json
+from colorama import Fore, Back, Style, init
+
+init(autoreset=True)
+
+VERSION = "0.0.2"
+
+Logo = """   ___|    _ \\   |   | _ _|  __ \\  
+ \\___ \\   |   |  |   |   |   |   | 
+       |  |   |  |   |   |   |   | 
+ _____/  \\__\\_\\ \\___/  ___| ____/  
+                                   """
+
+
+def parse_string(text: str, mode: int):
+    """Parse une chaîne selon différents modes.
+    
+    Args:
+        text: Texte à parser
+        mode: 0=split espace, 1=séparateur custom, 3=tokenizer avancé
+    """
+    if mode == 0:
+        # Split simple par espace
+        return text.split(" ")
+
+    elif mode == 1:
+        # Split par séparateur custom
+        return text.split("|;RDS-SEPARATOR;|")
+
+    elif mode == 3:
+        # Tokenizer avancé (gère " ' et +)
+        tokens = []
+        current = ""
+        in_quote = None  # " ou '
+        i = 0
+
+        while i < len(text):
+            char = text[i]
+
+            # Gestion des guillemets
+            if char in ('"', "'"):
+                if in_quote is None:
+                    in_quote = char
+                elif in_quote == char:
+                    in_quote = None
+                else:
+                    current += char
+            # Séparateur espace hors guillemets
+            elif char == " " and in_quote is None:
+                if current:
+                    tokens.append(current)
+                    current = ""
+            # Gestion du +
+            elif char == "+" and in_quote is None:
+                if current:
+                    tokens.append(current)
+                    current = ""
+                tokens.append("+")
+            else:
+                current += char
+
+            i += 1
+
+        if current:
+            tokens.append(current)
+
+        return tokens
+
+    else:
+        raise ValueError(f"Mode invalide: {mode}. Modes disponibles: 0, 1, 3")
+
+
+def CLI():
+    """Interface en ligne de commande."""
+    USER_ID = 0
+
+    print(Fore.YELLOW + Logo + Style.RESET_ALL)
+    print(f"Version: {VERSION}\n")
+
+    while True:
+        try:
+            user_input = input(f"{Fore.GREEN}SQUID>{Style.RESET_ALL} ").strip()
+            
+            # Ignorer les lignes vides
+            if not user_input:
+                continue
+                
+            command = parse_string(user_input, 0)
+            
+            if command[0] == "exit":
+                print("Au revoir!")
+                break
+                
+            elif command[0] == "help":
+                print("\nCommandes disponibles:")
+                print("  help  - Affiche cette aide")
+                print("  exit  - Quitte le programme")
+                print("  [cmd] - Exécute un paquet R_[cmd]\n")
+                
+            else:
+                package_name = f"R_{command[0]}"
+                available_packages = Ant({"CMD": "list"})
+                
+                if package_name in available_packages:
+                    print(Fore.LIGHTGREEN_EX + f"Exécution du paquet {command[0]}" + Style.RESET_ALL)
+                    result = Ant({
+                        "CMD": "exec",
+                        "KEY": package_name,
+                        "VALUE":json.loads(" ".join(command[1:])) if len(command) > 1 else None,
+                        "UID": USER_ID
+                    })
+                    if result is not None:
+                        print(result)
+                else:
+                    print(Fore.RED + f"Erreur: Paquet '{command[0]}' non trouvé" + Style.RESET_ALL)
+                    print(f"Paquets disponibles: {', '.join([p.replace('R_', '') for p in available_packages])}")
+                    
+        except KeyboardInterrupt:
+            print("\n\nInterruption (Ctrl+C). Tapez 'exit' pour quitter.")
+        except Exception as e:
+            print(Fore.RED + f"Erreur: {str(e)}" + Style.RESET_ALL)
+
+
+def version_check(V1: str, V2: str) -> int:
+    """Compare deux versions au format X.Y.Z.
+    
+    Returns:
+        0: Erreur ou versions invalides
+        1: V1 > V2
+        -1: V1 < V2
+        2: V1 == V2
+    """
+    if not V1 or not V2:
+        return 0
+    if "." not in V1 or "." not in V2:
+        return 0
+    
+    V1_parts = V1.split(".")
+    V2_parts = V2.split(".")
+    
+    if len(V1_parts) != 3 or len(V2_parts) != 3:
+        return 0
+
+    if V1 == V2:
+        return 2
+    
+    try:
+        for i in range(3):
+            v1_num = int(V1_parts[i])
+            v2_num = int(V2_parts[i])
+            
+            if v1_num > v2_num:
+                return 1
+            elif v1_num < v2_num:
+                return -1
+    except ValueError:
+        return 0
+    
+    return 2  # Si toutes les parties sont égales
+
+
+def verify(CMD):
+    """Vérifie la version de SQUID."""
+    fp = CMD.get("FILE", "Ant.reco")
+
+    try:
+        stored_version = Ant({"CMD": "read", "KEY": "SQUID_VERSION", "FILE": fp})
+        version_status = version_check(stored_version, VERSION)
+        
+        if version_status == 0:
+            # Première installation ou version invalide
+            Ant({"CMD": "write", "KEY": "SQUID_VERSION", "VALUE": VERSION, "FILE": fp})
+            print("Bienvenue sur SQUID " + Fore.LIGHTGREEN_EX + VERSION + Style.RESET_ALL)
+            
+        elif version_status == 1:
+            # Version stockée plus récente (downgrade)
+            print(Fore.RED + "Erreur: Version SQUID incompatible (downgrade détecté)" + Style.RESET_ALL)
+            print(f"Version installée: {VERSION}, Version requise: {stored_version}")
+            
+        elif version_status == -1:
+            # Mise à jour disponible
+            print(Fore.YELLOW + "Une mise à jour de SQUID est disponible" + Style.RESET_ALL)
+            print(f"Version actuelle: {stored_version} → Nouvelle version: {VERSION}")
+            Ant({"CMD": "write", "KEY": "SQUID_VERSION", "VALUE": VERSION, "FILE": fp})
+            
+        else:  # version_status == 2
+            # Versions identiques
+            pass
+            
+    except Exception as e:
+        print(Fore.RED + f"Erreur lors de la vérification de version: {str(e)}" + Style.RESET_ALL)
+
+    if "R_SQUID" not in Ant({"CMD": "list"}):
+        print(Fore.RED + "Erreur: SQUID n'est pas installé" + Style.RESET_ALL)
+        print(Ant({"CMD": "install", "KEY": "R_SQUID", "FILE": fp}))
+
+
+def SQUID(CMD: dict, cli=False):
+    """Point d'entrée principal de SQUID.
+    
+    Args:
+        CMD: Dictionnaire de configuration
+        cli: Si True, lance l'interface CLI
+    """
+    verify(CMD)
+    if cli:
+        CLI()
+
+
+if __name__ == "__main__":
+    SQUID({}, True)
