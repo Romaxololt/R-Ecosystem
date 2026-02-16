@@ -139,8 +139,11 @@ class PacketManager:
         if not user or not repo:
             raise PacketManagerError("Configuration PM_USR ou PM_REPO manquante")
         
-        # Correction: ajouter .py si nécessaire pour l'URL
-        package_name = name if name.endswith(".py") else f"{name}.py"
+        if name.endswith(".py"):
+            package_name = name[:-3]
+        else:
+            package_name = name
+
         return f"https://raw.githubusercontent.com/{user}/{repo}/main/{package_name}"
 
     def _get_libs_list(self) -> List[str]:
@@ -390,4 +393,3 @@ def Ant(CMD: Dict[str, Any], uid=0) -> Any:
         return f"Erreur de validation: {e}"
     except Exception as e:
         return f"Erreur inattendue: {type(e).__name__}: {e}"
-
